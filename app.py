@@ -66,12 +66,46 @@ if "result" in st.session_state:
             if df.empty: st.warning("No matching common US-GAAP annual fact found. No value has been imputed.")
             else: st.dataframe(df.sort_values("end",ascending=False),use_container_width=True,hide_index=True)
     st.subheader("Illustrative DCF scenarios")
-    shares=shares_b*1e9 if shares_b>0 else (summary.get("shares") or {}).get("value")
-    cash=cash_b*1e9 if cash_b>0 else ((summary.get("cash") or {}).get("value") or 0)
-    debt=debt_b*1e9 if debt_b>0 else sum((summary.get(k) or {}).get("value") or 0 for k in ("short_debt","long_debt"))
+   
+    shares_record = summary.get("shares") or {}
+    cash_record = summary.get("cash") or {}
+    short_debt_record = summary.get("short_debt") or {}
+    long_debt_record = summary.get("long_debt") or {}
+
+    # Require manually verified inputs for the initial DCF.
+    shares = shares_b * 1e9 if shares_b > 0 else None
+    cash = cash_b * 1e9 if cash_b > 0 else None
+    debt = debt_b * 1e9 if debt_b > 0 else None
     fcf = summary["fcf_proxy"].get("value")
-    result=scenarios(fcf,shares,cash,debt,price if price>0 else None,
-        {"Bear":bg,"Base":mg,"Bull":ug},{"Bear":bw,"Base":mw,"Bull":uw},tg)
+
+    if shares is None:
+        st.warning(
+            "DCF blocked: enter manually verified shares outstanding "
+            "in billions. Confirm the date and diluted-share basis."
+        )
+    elif cash is None or debt is None:
+        st.warning(
+            "DCF blocked: enter manually verified cash and debt "
+            "in USD billions, reconciled to the same filing."
+        )
+    elif fcf is None:
+        st.warning("DCF blocked: annual FCF proxy is unavailable.")
+    elif price <= 0:
+        st.warning(
+            "DCF blocked: enter a manually verified current share price."
+        )
+    else:
+        result = scenarios(
+            fcf,
+            shares,
+            cash,
+            debt,
+            price,
+            {"Bear": bg, "Base": mg, "Bull": ug},
+            {"Bear": bw, "Base": mw, "Bull": uw},
+            tg,
+        )
+
     if "error" in result: st.warning(result["error"])
     else:
         rows=[{"Scenario":k,**v} for k,v in result.items()]
