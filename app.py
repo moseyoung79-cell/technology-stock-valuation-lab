@@ -69,6 +69,7 @@ if "result" in st.session_state:
     shares=shares_b*1e9 if shares_b>0 else (summary.get("shares") or {}).get("value")
     cash=cash_b*1e9 if cash_b>0 else ((summary.get("cash") or {}).get("value") or 0)
     debt=debt_b*1e9 if debt_b>0 else sum((summary.get(k) or {}).get("value") or 0 for k in ("short_debt","long_debt"))
+    fcf = summary["fcf_proxy"].get("value")
     result=scenarios(fcf,shares,cash,debt,price if price>0 else None,
         {"Bear":bg,"Base":mg,"Bull":ug},{"Bear":bw,"Base":mw,"Bull":uw},tg)
     if "error" in result: st.warning(result["error"])
