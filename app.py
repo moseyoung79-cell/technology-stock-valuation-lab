@@ -106,18 +106,37 @@ if "result" in st.session_state:
             tg,
         )
 
-    if "error" in result: st.warning(result["error"])
-    else:
-        rows=[{"Scenario":k,**v} for k,v in result.items()]
-        df=pd.DataFrame(rows)
-        st.dataframe(df[["Scenario","growth","wacc","terminal_growth","enterprise_value","equity_value","intrinsic_per_share","margin_of_safety","status"]].style.format({
-            "growth":"{:.1%}","wacc":"{:.1%}","terminal_growth":"{:.1%}",
-            "enterprise_value":"${:,.0f}","equity_value":"${:,.0f}","intrinsic_per_share":"${:,.2f}","margin_of_safety":"{:.1%}"
-        },na_rep="N/A"),use_container_width=True,hide_index=True)
-        st.warning("DCF is illustrative and uses a simplified FCF proxy plus simplified cash/debt adjustments. Verify shares, cash, debt, source periods and assumptions before use.")
-    annual=[]
-    for metric,df in metrics.items():
-        for _,row in df.iterrows(): annual.append({"metric":metric,**row.to_dict()})
-    st.download_button("Download SEC facts CSV",pd.DataFrame(annual).to_csv(index=False),f'{r["ticker"]}_sec_facts.csv',"text/csv")
+    if isinstance(result, dict) and "error" in result:
+    st.warning(f"DCF blocked: {result['error']}")
+elif isinstance(result, dict):
+    rows = [
+        {"Scenario": scenario, **values}
+        for scenario, values in result.items()
+    ]
+    df = pd.DataFrame(rows)
+
+    st.dataframe(
+        df,
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    st.warning(
+        "DCF is illustrative and uses a simplified FCF proxy. "
+        "Verify all inputs and assumptions before relying on results."
+    )
+else:
+    st.error("Unexpected DCF result format. Please review the app logs.")
+annual = []
+for metric, df in metrics.items():
+for _, row in df.iterrows():
+annual.append({"metric": metric, **row.to_dict()})
+
+st.download_button(
+"Download SEC facts CSV",
+pd.DataFrame(annual).to_csv(index=False),
+f'{r["ticker"]}_sec_facts.csv',
+"text/csv",
+)
 st.divider()
 st.caption("Next milestones: independently reconcile NVDA facts to official filings, add filing-specific validation records, then configure live price data and quarterly checks.")
