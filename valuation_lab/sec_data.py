@@ -6,6 +6,16 @@ import pandas as pd
 TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
 FACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
 
+# Flow metrics cover a reporting period; balance-sheet metrics
+# represent a point in time. Keep those rules separate.
+FLOW_METRICS = {
+    "revenue",
+    "operating_income",
+    "net_income",
+    "operating_cash_flow",
+    "capex",
+}
+
 TAGS = {
     "revenue": [
         "RevenueFromContractWithCustomerExcludingAssessedTax",
@@ -15,19 +25,29 @@ TAGS = {
     "operating_income": ["OperatingIncomeLoss"],
     "net_income": ["NetIncomeLoss", "ProfitLoss"],
     "equity": ["StockholdersEquity"],
-    "cash": ["CashAndCashEquivalentsAtCarryingValue"],
+    "cash": [
+        "CashAndCashEquivalentsAtCarryingValue",
+        "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents",
+    ],
     "short_debt": [
         "ShortTermBorrowings",
         "ShortTermDebtCurrent",
         "LongTermDebtCurrent",
     ],
-    "long_debt": ["LongTermDebtNoncurrent", "LongTermDebt"],
+    "long_debt": [
+        "LongTermDebtNoncurrent",
+        "LongTermDebt",
+    ],
     "operating_cash_flow": [
         "NetCashProvidedByUsedInOperatingActivities"
     ],
-    "capex": ["PaymentsToAcquirePropertyPlantAndEquipment"],
+    "capex": [
+        "PaymentsToAcquirePropertyPlantAndEquipment"
+    ],
     "shares": ["EntityCommonStockSharesOutstanding"],
 }
+
+VALID_FORMS = {"10-K", "10-Q"}
 
 
 def headers():
@@ -42,13 +62,9 @@ def headers():
         except Exception:
             user_agent = ""
 
-    if (
-        not user_agent
-        or "example.com" in user_agent
-        or "your-real-email" in user_agent
-    ):
+    if not user_agent or "@" not in user_agent:
         raise RuntimeError(
-            "Please configure SEC_USER_AGENT with an app name "
+            "Configure SEC_USER_AGENT with an app name "
             "and a real contact email in Streamlit Secrets."
         )
 
@@ -76,83 +92,92 @@ def get_tickers():
 
 def get_facts(cik):
     url = FACTS_URL.format(cik=str(cik).zfill(10))
-    response = requests.get(url, headers=headers(), timeout=45)
+    response = requests.get(
+        url, headers=headers(), timeout=45
+    )
     response.raise_for_status()
     return response.json(), url
 
 
 def _tag_records(facts, metric):
+    """
+    Extract SEC facts without silently mixing alternate tags.
+
+    Flow metrics: annual 10-K periods only, approximately one year.
+    Instant metrics: 10-K/10-Q point-in-time facts.
+    Raw value, unit, tag, period and filing date are retained.
+
+    This is a preliminary extraction rule, not filing-level
+    verification. Company-specific tag mapping may be necessary.
+    """
+    us_gaap = facts.get("facts", {}).get("us-gaap", {})
     records = []
+    seen_periods = set()
 
     for tag in TAGS[metric]:
-        fact = (
-            facts.get("facts", {})
-            .get("us-gaap", {})
-            .get(tag)
-        )
-
+        fact = us_gaap.get(tag)
         if not fact:
             continue
 
         for unit, entries in fact.get("units", {}).items():
             for entry in entries:
+                form = entry.get("form")
+                end = entry.get("end")
+                filed = entry.get("filed")
+                start = entry.get("start")
+
                 if (
-                    entry.get("form") != "10-K"
-                    or not entry.get("end")
-                    or not entry.get("filed")
+                    form not in VALID_FORMS
+                    or not end
+                    or not filed
                 ):
                     continue
 
-                start = entry.get("start")
-
-                if metric in (
-                    "revenue",
-                    "operating_income",
-                    "net_income",
-                    "operating_cash_flow",
-                    "capex",
-                ):
-                    if not start or entry.get("fp") != "FY":
+                if metric in FLOW_METRICS:
+                    if form != "10-K" or not start:
                         continue
 
                     days = (
-                        pd.Timestamp(entry["end"])
-                        - pd.Timestamp(start)
+                        pd.Timestamp(end) - pd.Timestamp(start)
                     ).days
 
                     if not 300 <= days <= 380:
                         continue
 
+                # Use the first available tag in the declared
+                # priority list for each period end.
+                period_key = (end, unit)
+                if period_key in seen_periods:
+                    continue
+
                 records.append({
-                    "end": entry["end"],
+                    "end": end,
                     "start": start,
                     "value": float(entry["val"]),
-                    "filed": entry["filed"],
+                    "filed": filed,
                     "fy": entry.get("fy"),
+                    "fp": entry.get("fp"),
+                    "form": form,
                     "tag": tag,
                     "unit": unit,
-                    "form": entry.get("form"),
-                    "fp": entry.get("fp"),
+                    "accn": entry.get("accn"),
+                    "frame": entry.get("frame"),
+                    "status": "SEC-sourced; filing verification required",
                 })
+                seen_periods.add(period_key)
 
     columns = [
-        "end", "start", "value", "filed", "fy",
-        "tag", "unit", "form", "fp",
+        "end", "start", "value", "filed", "fy", "fp",
+        "form", "tag", "unit", "accn", "frame", "status",
     ]
 
     if not records:
         return pd.DataFrame(columns=columns)
 
     df = pd.DataFrame(records)
-    df = df.sort_values(["end", "filed", "tag"])
-
-    # Keep one fact per period end. This is a preliminary
-    # extraction rule, not a substitute for filing review.
-    df = df.drop_duplicates(
-        subset=["end"], keep="last"
-    )
-
-    return df.sort_values("end").reset_index(drop=True)
+    return df.sort_values(
+        ["end", "filed"]
+    ).reset_index(drop=True)
 
 
 def extract_all(facts):
