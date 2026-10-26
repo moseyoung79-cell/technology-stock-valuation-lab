@@ -106,27 +106,27 @@ if "result" in st.session_state:
             tg,
         )
 
-    if isinstance(result, dict) and "error" in result:
-    st.warning(f"DCF blocked: {result['error']}")
-elif isinstance(result, dict):
-    rows = [
-        {"Scenario": scenario, **values}
-        for scenario, values in result.items()
-    ]
-    df = pd.DataFrame(rows)
+        if isinstance(result, dict) and "error" in result:
+            st.warning(f"DCF blocked: {result['error']}")
+        elif isinstance(result, dict):
+            rows = [
+                {"Scenario": scenario, **values}
+                for scenario, values in result.items()
+            ]
+            df = pd.DataFrame(rows)
 
-    st.dataframe(
-        df,
-        use_container_width=True,
-        hide_index=True,
-    )
+            st.dataframe(
+                df,
+                use_container_width=True,
+                hide_index=True,
+            )
 
-    st.warning(
-        "DCF is illustrative and uses a simplified FCF proxy. "
-        "Verify all inputs and assumptions before relying on results."
-    )
-else:
-    st.error("Unexpected DCF result format. Please review the app logs.")
+            st.warning(
+                "DCF is illustrative and uses a simplified FCF proxy. "
+                "Verify all inputs and assumptions before relying on results."
+            )
+        else:
+            st.error("Unexpected DCF result format. Please review the app logs.")
 annual = []
 for metric, df in metrics.items():
 for _, row in df.iterrows():
