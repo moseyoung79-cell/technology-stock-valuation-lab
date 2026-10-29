@@ -6,38 +6,40 @@ from typing import Any
 import pandas as pd
 
 
-# ---------------------------------------------------------------------
+# ============================================================
 # Helpers
-# ---------------------------------------------------------------------
+# ============================================================
 
 def _empty_frame(df: Any) -> bool:
-    """Return True when a metric DataFrame is missing or empty."""
+    """Check whether a metric DataFrame is missing or empty."""
     return not isinstance(df, pd.DataFrame) or df.empty
 
 
 def _as_number(value: Any) -> float | None:
-    """Convert a value to float, preserving missing values as None."""
-    if value is None or pd.isna(value):
+    """Convert a value to float without converting missing data to zero."""
+    if value is None:
         return None
 
     try:
+        if pd.isna(value):
+            return None
         return float(value)
     except (TypeError, ValueError):
         return None
 
 
-def _sort_records(df: pd.DataFrame) -> pd.DataFrame:
+def _sort_records(df: pd.DataFrame | None) -> pd.DataFrame:
     """Sort records by period end and filing date."""
     if _empty_frame(df):
         return pd.DataFrame()
 
     result = df.copy()
 
-    if "end" in result.columns:
-        result["end"] = pd.to_datetime(result["end"], errors="coerce")
-
-    if "filed" in result.columns:
-        result["filed"] = pd.to_datetime(result["filed"], errors="coerce")
+    for column in ("end", "start", "filed"):
+        if column in result.columns:
+            result[column] = pd.to_datetime(
+                result[column], errors="coerce"
+            )
 
     sort_columns = [
         column for column in ("end", "filed")
@@ -54,11 +56,7 @@ def _latest_record(
     df: pd.DataFrame | None,
     end: str | pd.Timestamp | None = None,
 ) -> dict[str, Any] | None:
-    """
-    Return the latest available record.
-
-    If end is provided, only records with that period-end date are eligible.
-    """
+    """Return the latest record, optionally restricted to one end date."""
     if _empty_frame(df):
         return None
 
@@ -71,30 +69,33 @@ def _latest_record(
     if result.empty:
         return None
 
-    row = result.iloc[-1]
-    return row.to_dict()
+    return result.iloc[-1].to_dict()
 
 
 def _latest_annual(
     df: pd.DataFrame | None,
     end: str | pd.Timestamp | None = None,
 ) -> dict[str, Any] | None:
-    """Return the latest annual record for a flow metric."""
+    """
+    Return the latest annual flow record.
+
+    Prefer 10-K records covering approximately one fiscal year.
+    """
     if _empty_frame(df):
         return None
 
     result = _sort_records(df)
 
     if "form" in result.columns:
-        result = result[result["form"].astype(str).str.upper() == "10-K"]
+        result = result[
+            result["form"].astype(str).str.upper() == "10-K"
+        ]
 
     if "start" in result.columns and "end" in result.columns:
-        starts = pd.to_datetime(result["start"], errors="coerce")
-        ends = pd.to_datetime(result["end"], errors="coerce")
-        duration_days = (ends - starts).dt.days
+        duration_days = (
+            result["end"] - result["start"]
+        ).dt.days
 
-        # Annual income/cash-flow records should generally cover
-        # approximately one fiscal year.
         result = result[
             duration_days.between(300, 380, inclusive="both")
         ]
@@ -109,31 +110,48 @@ def _latest_annual(
     return result.iloc[-1].to_dict()
 
 
-def _record_value(record: dict[str, Any] | None) -> float | None:
+def _record_value(
+    record: dict[str, Any] | None,
+) -> float | None:
     if record is None:
         return None
 
     return _as_number(record.get("value"))
 
 
-def _record_date(record: dict[str, Any] | None) -> str | None:
+def _format_date(value: Any) -> str | None:
+    if value is None:
+        return None
+
+    try:
+        if pd.isna(value):
+            return None
+
+        parsed = pd.to_datetime(value, errors="coerce")
+
+        if pd.isna(parsed):
+            return None
+
+        return parsed.strftime("%Y-%m-%d")
+    except (TypeError, ValueError):
+        return None
+
+
+def _record_date(
+    record: dict[str, Any] | None,
+) -> str | None:
     if record is None:
         return None
 
-    value = record.get("end")
-    if value is None or pd.isna(value):
-        return None
-
-    return pd.to_datetime(value).strftime("%Y-%m-%d")
+    return _format_date(record.get("end"))
 
 
 def _record_info(
     record: dict[str, Any] | None,
     definition: str,
-    *,
     status: str | None = None,
 ) -> dict[str, Any]:
-    """Return a consistent result structure for a metric."""
+    """Return a consistent data structure for a reported metric."""
     if record is None:
         return {
             "value": None,
@@ -148,17 +166,11 @@ def _record_info(
 
     value = _record_value(record)
 
-    def format_date(field: str) -> str | None:
-        raw = record.get(field)
-        if raw is None or pd.isna(raw):
-            return None
-        return pd.to_datetime(raw).strftime("%Y-%m-%d")
-
     return {
         "value": value,
-        "end": format_date("end"),
-        "start": format_date("start"),
-        "filed": format_date("filed"),
+        "end": _format_date(record.get("end")),
+        "start": _format_date(record.get("start")),
+        "filed": _format_date(record.get("filed")),
         "unit": record.get("unit"),
         "tag": record.get("tag"),
         "definition": definition,
@@ -173,9 +185,9 @@ def _derived(
     end: str | None,
     definition: str,
     status: str = "available",
-    *,
     start: str | None = None,
 ) -> dict[str, Any]:
+    """Return a consistent data structure for a calculated metric."""
     return {
         "value": value,
         "end": end,
@@ -193,160 +205,93 @@ def _latest_balance_item(
     metric_name: str,
     definition: str,
 ) -> dict[str, Any]:
-    """
-    Select the latest available point-in-time balance-sheet record.
-
-    Unlike annual flow metrics, balance-sheet values represent a date,
-    not a duration.
-    """
+    """Get the latest available point-in-time balance-sheet value."""
     record = _latest_record(metrics.get(metric_name))
     return _record_info(record, definition)
-
-
-def _balance_items_at_date(
-    metrics: dict[str, pd.DataFrame],
-    metric_names: list[str],
-) -> tuple[str | None, dict[str, dict[str, Any] | None]]:
-    """
-    Find the most recent date shared by the requested balance-sheet metrics.
-
-    This helper is for calculations that genuinely require a common date.
-    Individual values are still returned separately elsewhere.
-    """
-    available_dates: dict[str, set[str]] = {}
-
-    for name in metric_names:
-        df = metrics.get(name)
-
-        if _empty_frame(df) or "end" not in df.columns:
-            available_dates[name] = set()
-            continue
-
-        ends = pd.to_datetime(df["end"], errors="coerce")
-        available_dates[name] = {
-            date.strftime("%Y-%m-%d")
-            for date in ends.dropna().unique()
-        }
-
-    if not available_dates:
-        return None, {}
-
-    common_dates = set.intersection(*available_dates.values())
-
-    if not common_dates:
-        return None, {}
-
-    common_end = max(common_dates)
-
-    records = {
-        name: _latest_record(metrics.get(name), end=common_end)
-        for name in metric_names
-    }
-
-    return common_end, records
 
 
 def _same_period(
     first: dict[str, Any] | None,
     second: dict[str, Any] | None,
 ) -> bool:
-    """Check whether two records have the same start and end dates."""
+    """Check that two flow records cover the same start and end dates."""
     if first is None or second is None:
         return False
 
     first_end = _record_date(first)
     second_end = _record_date(second)
 
-    if not first_end or first_end != second_end:
-        return False
+    first_start = _format_date(first.get("start"))
+    second_start = _format_date(second.get("start"))
 
-    first_start = first.get("start")
-    second_start = second.get("start")
-
-    if first_start is None or second_start is None:
-        return False
-
-    first_start = pd.to_datetime(first_start, errors="coerce")
-    second_start = pd.to_datetime(second_start, errors="coerce")
-
-    if pd.isna(first_start) or pd.isna(second_start):
-        return False
-
-    return first_start == second_start
+    return (
+        first_end is not None
+        and first_end == second_end
+        and first_start is not None
+        and first_start == second_start
+    )
 
 
-# ---------------------------------------------------------------------
+# ============================================================
 # Main financial summary
-# ---------------------------------------------------------------------
+# ============================================================
 
-def summarize(metrics: dict[str, pd.DataFrame]) -> dict[str, dict[str, Any]]:
+def summarize(
+    metrics: dict[str, pd.DataFrame],
+) -> dict[str, dict[str, Any]]:
     """
-    Summarize SEC company facts for financial analysis.
+    Summarize SEC company facts.
 
-    Flow metrics are taken from annual 10-K periods.
-    Balance-sheet metrics are selected independently by their latest date.
-
-    Missing values remain None. They are never silently replaced with zero.
+    Flow metrics use annual 10-K records.
+    Balance-sheet metrics are selected independently by reporting date.
+    Missing data stays None; it is never silently converted to zero.
     """
     metrics = metrics or {}
+
+    # --------------------------------------------------------
+    # Latest annual flow records
+    # --------------------------------------------------------
 
     revenue_record = _latest_annual(metrics.get("revenue"))
     operating_income_record = _latest_annual(
         metrics.get("operating_income")
     )
     net_income_record = _latest_annual(metrics.get("net_income"))
-    operating_cash_flow_record = _latest_annual(
+    ocf_record = _latest_annual(
         metrics.get("operating_cash_flow")
     )
     capex_record = _latest_annual(metrics.get("capex"))
-    equity_record = _latest_record(metrics.get("equity"))
 
     revenue = _record_value(revenue_record)
     operating_income = _record_value(operating_income_record)
     net_income = _record_value(net_income_record)
-    operating_cash_flow = _record_value(operating_cash_flow_record)
+    operating_cash_flow = _record_value(ocf_record)
     capex = _record_value(capex_record)
-    equity = _record_value(equity_record)
 
     revenue_end = _record_date(revenue_record)
     operating_income_end = _record_date(operating_income_record)
     net_income_end = _record_date(net_income_record)
-    ocf_end = _record_date(operating_cash_flow_record)
+    ocf_end = _record_date(ocf_record)
     capex_end = _record_date(capex_record)
-
-    # -------------------------------------------------------------
-    # Revenue and profitability
-    # -------------------------------------------------------------
 
     revenue_info = _record_info(
         revenue_record,
-        "Latest annual revenue reported in SEC Company Facts.",
+        "Latest annual revenue reported by the SEC.",
     )
 
     operating_income_info = _record_info(
         operating_income_record,
-        "Latest annual operating income reported in SEC Company Facts.",
+        "Latest annual operating income reported by the SEC.",
     )
 
     net_income_info = _record_info(
         net_income_record,
-        "Latest annual net income reported in SEC Company Facts.",
+        "Latest annual net income reported by the SEC.",
     )
 
-    if (
-        revenue is not None
-        and revenue != 0
-        and operating_income is not None
-        and revenue_end == operating_income_end
-    ):
-        operating_margin = operating_income / revenue
-        operating_margin_status = "available"
-    else:
-        operating_margin = None
-        operating_margin_status = (
-            "unavailable: missing data, zero revenue, "
-            "or reporting periods do not match"
-        )
+    # --------------------------------------------------------
+    # Return on sales
+    # --------------------------------------------------------
 
     if (
         revenue is not None
@@ -363,94 +308,103 @@ def summarize(metrics: dict[str, pd.DataFrame]) -> dict[str, dict[str, Any]]:
             "or reporting periods do not match"
         )
 
-    # -------------------------------------------------------------
-    # Return on equity
-    # -------------------------------------------------------------
+    # --------------------------------------------------------
+    # Operating margin
+    # --------------------------------------------------------
+
+    if (
+        revenue is not None
+        and revenue != 0
+        and operating_income is not None
+        and revenue_end == operating_income_end
+    ):
+        operating_margin = operating_income / revenue
+        operating_margin_status = "available"
+    else:
+        operating_margin = None
+        operating_margin_status = (
+            "unavailable: missing data, zero revenue, "
+            "or reporting periods do not match"
+        )
+
+    # --------------------------------------------------------
+    # Return on equity (ROE)
+    # --------------------------------------------------------
 
     roe = None
     roe_status = "unavailable: required annual data not found"
     roe_end = None
 
+    equity_history = _sort_records(metrics.get("equity"))
+
     if (
         net_income_record is not None
-        and equity_record is not None
         and net_income is not None
-        and equity is not None
         and net_income_end is not None
-        and equity_end_matches = False
+        and not equity_history.empty
+        and "end" in equity_history.columns
     ):
-        # This branch is intentionally not used; period matching is
-        # performed below using explicit date comparisons.
-        pass
+        target_end = pd.to_datetime(net_income_end)
 
-    if net_income_record is not None and equity_record is not None:
-        annual_equity_end = _record_date(equity_record)
+        ending_equity_record = _latest_record(
+            equity_history,
+            end=target_end,
+        )
 
-        if net_income_end and annual_equity_end == net_income_end:
-            equity_history = _sort_records(metrics.get("equity"))
+        prior_records = equity_history[
+            equity_history["end"] < target_end
+        ]
 
-            if (
-                not equity_history.empty
-                and "end" in equity_history.columns
-            ):
-                equity_history = equity_history[
-                    equity_history["end"] < pd.to_datetime(net_income_end)
-                ]
-
-                if not equity_history.empty:
-                    previous_equity_record = equity_history.iloc[-1].to_dict()
-                    previous_equity = _record_value(previous_equity_record)
-
-                    if (
-                        previous_equity is not None
-                        and equity is not None
-                    ):
-                        average_equity = (previous_equity + equity) / 2
-
-                        if average_equity != 0 and net_income is not None:
-                            roe = net_income / average_equity
-                            roe_status = "available"
-                            roe_end = net_income_end
-                        else:
-                            roe_status = (
-                                "unavailable: average equity is zero "
-                                "or net income is missing"
-                            )
-                else:
-                    roe_status = (
-                        "unavailable: prior-period equity not found"
-                    )
-            else:
-                roe_status = "unavailable: equity history not found"
-        else:
+        if ending_equity_record is None:
             roe_status = (
-                "unavailable: net income and ending equity dates do not match"
+                "unavailable: ending equity does not match "
+                "the net income fiscal year-end"
             )
+        elif prior_records.empty:
+            roe_status = (
+                "unavailable: prior-period equity not found"
+            )
+        else:
+            ending_equity = _record_value(ending_equity_record)
+            previous_equity_record = prior_records.iloc[-1].to_dict()
+            previous_equity = _record_value(previous_equity_record)
 
-    # -------------------------------------------------------------
+            if ending_equity is None or previous_equity is None:
+                roe_status = (
+                    "unavailable: beginning or ending equity is missing"
+                )
+            else:
+                average_equity = (
+                    previous_equity + ending_equity
+                ) / 2
+
+                if average_equity == 0:
+                    roe_status = "unavailable: average equity is zero"
+                else:
+                    roe = net_income / average_equity
+                    roe_status = "available"
+                    roe_end = net_income_end
+
+    elif equity_history.empty:
+        roe_status = "unavailable: equity history not found"
+
+    # --------------------------------------------------------
     # Free cash flow proxy
-    # -------------------------------------------------------------
+    # --------------------------------------------------------
 
     if (
-        operating_cash_flow_record is not None
+        ocf_record is not None
         and capex_record is not None
-        and _same_period(
-            operating_cash_flow_record,
-            capex_record,
-        )
+        and _same_period(ocf_record, capex_record)
         and operating_cash_flow is not None
         and capex is not None
     ):
-        # SEC capex is commonly reported as a positive cash outflow.
-        # Subtract its absolute value to avoid sign inconsistencies.
+        # SEC capex is usually a positive cash-outflow value.
+        # Using abs() also protects against inconsistent signs.
         fcf_proxy = operating_cash_flow - abs(capex)
         fcf_status = "available"
         fcf_end = ocf_end
-        fcf_start = (
-            pd.to_datetime(
-                operating_cash_flow_record["start"]
-            ).strftime("%Y-%m-%d")
-        )
+        fcf_start = _format_date(ocf_record.get("start"))
     else:
         fcf_proxy = None
         fcf_status = (
@@ -460,15 +414,15 @@ def summarize(metrics: dict[str, pd.DataFrame]) -> dict[str, dict[str, Any]]:
         fcf_end = None
         fcf_start = None
 
-    # -------------------------------------------------------------
-    # Balance-sheet items: select independently
-    # -------------------------------------------------------------
+    # --------------------------------------------------------
+    # Balance-sheet values
+    # --------------------------------------------------------
 
     cash_info = _latest_balance_item(
         metrics,
         "cash",
         "Latest reported cash and cash equivalents. "
-        "May not include all short-term investments.",
+        "May exclude some short-term investments.",
     )
 
     short_debt_info = _latest_balance_item(
@@ -486,13 +440,11 @@ def summarize(metrics: dict[str, pd.DataFrame]) -> dict[str, dict[str, Any]]:
     shares_info = _latest_balance_item(
         metrics,
         "shares",
-        "Latest reported point-in-time common shares outstanding. "
-        "This is not necessarily diluted weighted-average shares.",
+        "Latest point-in-time common shares outstanding. "
+        "Not necessarily diluted weighted-average shares.",
     )
 
-    # Debt is only calculated when both debt categories are available
-    # and their reporting dates match. An absent category is not
-    # silently interpreted as zero.
+    # Do not assume missing debt categories equal zero.
     short_debt = short_debt_info["value"]
     long_debt = long_debt_info["value"]
     short_debt_end = short_debt_info["end"]
@@ -523,37 +475,43 @@ def summarize(metrics: dict[str, pd.DataFrame]) -> dict[str, dict[str, Any]]:
         "unit": "USD" if debt_value is not None else None,
         "tag": None,
         "definition": (
-            "Short-term debt plus long-term debt, only when both "
-            "categories are available for the same reporting date."
+            "Short-term debt plus long-term debt, when both "
+            "are available for the same reporting date."
         ),
         "status": debt_status,
     }
 
-    # Common date is provided for diagnostics only. It does not prevent
-    # individual balance-sheet values from being returned.
-    balance_sheet_as_of = None
-    dates = [
+    # Report a common date only if cash, total debt and shares
+    # all have the same date. Individual values remain available.
+    balance_dates = [
         cash_info.get("end"),
-        debt_end,
+        debt_info.get("end"),
         shares_info.get("end"),
     ]
-    valid_dates = [date for date in dates if date is not None]
+    valid_dates = [
+        date for date in balance_dates if date is not None
+    ]
 
-    if valid_dates and len(set(valid_dates)) == 1:
+    if (
+        len(valid_dates) == 3
+        and len(set(valid_dates)) == 1
+    ):
         balance_sheet_as_of = valid_dates[0]
+        balance_date_status = "available"
+    else:
+        balance_sheet_as_of = None
+        balance_date_status = (
+            "different reporting dates or incomplete data"
+        )
 
-    # -------------------------------------------------------------
-    # Return a consistent structure for the app
-    # -------------------------------------------------------------
+    # --------------------------------------------------------
+    # Return summary
+    # --------------------------------------------------------
 
     return {
         "revenue": revenue_info,
         "operating_income": operating_income_info,
         "net_income": net_income_info,
-        "equity": _record_info(
-            equity_record,
-            "Latest reported stockholders' equity.",
-        ),
         "cash_value": cash_info,
         "short_debt_value": short_debt_info,
         "long_debt_value": long_debt_info,
@@ -567,7 +525,11 @@ def summarize(metrics: dict[str, pd.DataFrame]) -> dict[str, dict[str, Any]]:
         ),
         "operating_margin": _derived(
             operating_margin,
-            revenue_end if revenue_end == operating_income_end else None,
+            (
+                revenue_end
+                if revenue_end == operating_income_end
+                else None
+            ),
             "Operating margin = annual operating income / annual revenue.",
             operating_margin_status,
         ),
@@ -587,30 +549,25 @@ def summarize(metrics: dict[str, pd.DataFrame]) -> dict[str, dict[str, Any]]:
         "balance_sheet_as_of": _derived(
             None,
             balance_sheet_as_of,
-            "Common reporting date for cash, total debt, and shares, "
-            "when all three are available for the same date.",
-            (
-                "available"
-                if balance_sheet_as_of is not None
-                else "different reporting dates or incomplete data"
-            ),
+            "Common reporting date for cash, total debt and shares.",
+            balance_date_status,
         ),
     }
 
 
-# ---------------------------------------------------------------------
+# ============================================================
 # Data quality checks
-# ---------------------------------------------------------------------
+# ============================================================
 
 def quality_checks(
     metrics: dict[str, pd.DataFrame],
     summary: dict[str, dict[str, Any]],
 ) -> list[dict[str, str]]:
     """
-    Produce readable data-quality warnings for the app.
+    Generate data-quality messages for the Streamlit interface.
 
-    This function does not alter financial values or assume missing
-    values are zero.
+    This function reports missing data but never changes missing values
+    into zero.
     """
     metrics = metrics or {}
     summary = summary or {}
@@ -624,7 +581,7 @@ def quality_checks(
             "message": message,
         })
 
-    # Check whether the principal SEC metrics were found.
+    # Core SEC records.
     core_metrics = [
         ("revenue", "Revenue"),
         ("operating_income", "Operating income"),
@@ -641,29 +598,38 @@ def quality_checks(
                 "No usable SEC records were found for this metric.",
             )
 
-    # Derived profitability ratios.
-    for key, label in (
+    # Derived ratios and FCF.
+    derived_metrics = [
         ("ros", "Return on sales"),
         ("operating_margin", "Operating margin"),
         ("roe", "ROE"),
         ("fcf_proxy", "FCF proxy"),
-    ):
+    ]
+
+    for key, label in derived_metrics:
         item = summary.get(key, {})
+
         if item.get("value") is None:
             add(
                 "Warning",
                 label,
-                str(item.get("status") or "Metric is unavailable."),
+                str(
+                    item.get("status")
+                    or "Metric is unavailable."
+                ),
             )
 
-    # Balance-sheet fields are checked independently.
-    for key, label in (
+    # Balance-sheet values.
+    balance_metrics = [
         ("cash_value", "Cash and cash equivalents"),
         ("short_debt_value", "Short-term debt"),
         ("long_debt_value", "Long-term debt"),
         ("shares_value", "Shares outstanding"),
-    ):
+    ]
+
+    for key, label in balance_metrics:
         item = summary.get(key, {})
+
         if item.get("value") is None:
             add(
                 "Warning",
@@ -672,6 +638,7 @@ def quality_checks(
             )
 
     debt_info = summary.get("debt_value", {})
+
     if debt_info.get("value") is None:
         add(
             "Warning",
@@ -682,7 +649,7 @@ def quality_checks(
             ),
         )
 
-    # Compare available balance-sheet dates.
+    # Check balance-sheet reporting dates.
     date_items = [
         ("Cash", summary.get("cash_value", {})),
         ("Short-term debt", summary.get("short_debt_value", {})),
@@ -696,33 +663,37 @@ def quality_checks(
         if item and item.get("end")
     ]
 
-    distinct_dates = {date for _, date in available_dates}
+    distinct_dates = {
+        date for _, date in available_dates
+    }
 
     if len(distinct_dates) > 1:
         date_details = "; ".join(
             f"{label}: {date}"
             for label, date in available_dates
         )
+
         add(
             "Info",
             "Balance-sheet dates",
             (
-                "Available balance-sheet items do not all share the same "
-                f"reporting date. Verify before using them together. {date_details}"
+                "Available balance-sheet items do not all share the "
+                "same reporting date. Verify before using them together. "
+                f"{date_details}"
             ),
         )
 
-    # Shares are point-in-time shares outstanding, not necessarily
-    # the diluted weighted-average shares used for EPS.
+    # Share-count definition warning.
     shares_info = summary.get("shares_value", {})
+
     if shares_info.get("value") is not None:
         add(
             "Info",
             "Shares outstanding",
             (
                 "SEC shares outstanding is a point-in-time figure. "
-                "Verify the share-count definition and date before using "
-                "it in per-share valuation."
+                "Verify the share-count definition and date before "
+                "using it for per-share valuation."
             ),
         )
 
@@ -730,7 +701,8 @@ def quality_checks(
         add(
             "Pass",
             "Data quality",
-            "No missing core metrics or obvious period-matching issues detected.",
+            "No missing core metrics or obvious period-matching "
+            "issues were detected.",
         )
 
     return checks
